@@ -5,6 +5,9 @@ use header::{Header, HeaderFormat};
 use header::parsing;
 use std::iter::Iterator;
 use std::ascii::AsciiExt;
+use std::collections::HashMap;
+use header::HttpDate;
+use std::str::FromStr;
 
 /// `Content-Disposition` header, defined in [RFC7235](https://tools.ietf.org/html/rfc7235#section-4.2)
 ///
@@ -86,7 +89,7 @@ impl<D: Disposition + Any> Header for ContentDisposition<D> where D::T: 'static 
 					None => return Err(::Error::Header),
 				};
 				if disposition == expected_disposition {
-					match <D as Disposition>::from_params(&params.skip(1).collect()).map(ContentDisposition) {
+					match <D as Disposition>::from_params(params.skip(1).collect()).map(ContentDisposition) {
 						Ok(h) => Ok(h),
 						Err(_) => Err(::Error::Header)
 					}
@@ -94,7 +97,7 @@ impl<D: Disposition + Any> Header for ContentDisposition<D> where D::T: 'static 
 					Err(::Error::Header)
 				}
 			} else {
-				match <D as Disposition>::from_params(&params.collect()).map(ContentDisposition) {
+				match <D as Disposition>::from_params(params.collect()).map(ContentDisposition) {
 					Ok(h) => Ok(h),
 					Err(_) => Err(::Error::Header)
 				}
@@ -138,7 +141,7 @@ pub trait Disposition: fmt::Debug + Clone + Send + Sync {
     /// Format the Disposition data into a header value.
     fn to_params(&self) -> ::Result<Vec<Self::T>>;
 
-	fn from_params(params: &Vec<&str>) -> ::Result<Self>;
+	fn from_params(params: Vec<&str>) -> ::Result<Self>;
 }
 
 impl Disposition for Vec<String> {
@@ -148,7 +151,7 @@ impl Disposition for Vec<String> {
         None
     }
 
-	fn from_params(params: &Vec<&str>) -> ::Result<Self> {
+	fn from_params(params: Vec<&str>) -> ::Result<Self> {
 		Ok(params.iter().map(|s| String::from(*s)).collect())
 	}
 
@@ -172,7 +175,7 @@ impl Disposition for Inline {
 		Ok(Vec::new())
     }
 
-	fn from_params(_: &Vec<&str>) -> ::Result<Self> {
+	fn from_params(_: Vec<&str>) -> ::Result<Self> {
 		Ok(Inline)
 	}
 }
@@ -182,9 +185,9 @@ impl Disposition for Inline {
 pub struct Attachment {
 	pub filename: String,
 	pub filename_fallback: Option<String>,
-	pub creation_date: Option<String>,
-	pub modification_date: Option<String>,
-	pub read_date: Option<String>,
+	pub creation_date: Option<HttpDate>,
+	pub modification_date: Option<HttpDate>,
+	pub read_date: Option<HttpDate>,
 	pub size: Option<usize>,
 }
 
@@ -199,18 +202,63 @@ impl Disposition for Attachment {
 		Ok(Vec::new())
     }
 
-	fn from_params(_: &Vec<&str>) -> ::Result<Self> {
-		Ok(Inline)
+	fn from_params(params: Vec<&str>) -> ::Result<Self> {
+		let hash_map = parse_param_vec_to_hash_map(params);
+		let filename = if hash_map.get("filename*").is_some() {
+			hash_map.get("filename*").map(|s| String::from(*s)).unwrap()
+		} else {
+			try!(hash_map.get("filename").map(|s| String::from(*s)).ok_or(::Error::Header))
+		};
+		let filename_fallback = if hash_map.get("filename*").is_some() {
+			hash_map.get("filename").map(|s| String::from(*s))
+		} else {
+			None
+		};
+		let creation_date = if hash_map.get("creation_date").is_some() {
+			Some(try!(HttpDate::from_str(hash_map.get("creation_date").unwrap()).map_err(|_| ::Error::Header)))
+		} else {
+			None
+		};
+		let modification_date = if hash_map.get("modification_date").is_some() {
+			Some(try!(HttpDate::from_str(hash_map.get("modification_date").unwrap()).map_err(|_| ::Error::Header)))
+		} else {
+			None
+		};
+		let read_date = if hash_map.get("read_date").is_some() {
+			Some(try!(HttpDate::from_str(hash_map.get("read_date").unwrap()).map_err(|_| ::Error::Header)))
+		} else {
+			None
+		};
+		let size = if hash_map.get("size").is_some() {
+			Some(try!(hash_map.get("size").unwrap().parse().map_err(|_| ::Error::Header)))
+		} else {
+			None
+		};
+		
+		Ok(Attachment {
+			filename: filename,
+			filename_fallback: filename_fallback,
+			creation_date: creation_date,
+			modification_date: modification_date,
+			read_date: read_date,
+			size: size
+		})
 	}
 }
 
 fn parse_param_vec_to_hash_map(params: Vec<&str>) -> HashMap<&str, &str> {
 
-	let map = HashMap::new();
+	let mut map = HashMap::new();
 
-	for param in &vec {
+	for param in &params {
+		let mut split_str_iter = param.split("=");
+		let key = split_str_iter.next().unwrap();
+		let value = split_str_iter.next().unwrap();
 
+		map.insert(key, value);
 	}
+
+	map
 }
 
 #[cfg(test)]
