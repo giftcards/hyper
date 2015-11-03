@@ -8,6 +8,7 @@ use std::ascii::AsciiExt;
 use std::collections::HashMap;
 use header::HttpDate;
 use std::str::FromStr;
+use std::error::Error;
 
 /// `Content-Disposition` header, defined in [RFC7235](https://tools.ietf.org/html/rfc7235#section-4.2)
 ///
@@ -89,7 +90,7 @@ impl<D: Disposition + Any> Header for ContentDisposition<D> where D::T: 'static 
 					None => return Err(::Error::Header),
 				};
 				if disposition == expected_disposition {
-					match <D as Disposition>::from_params(params.skip(1).collect()).map(ContentDisposition) {
+					match <D as Disposition>::from_params(parse_str_to_hash_map("").unwrap()).map(ContentDisposition) {
 						Ok(h) => Ok(h),
 						Err(_) => Err(::Error::Header)
 					}
@@ -97,7 +98,7 @@ impl<D: Disposition + Any> Header for ContentDisposition<D> where D::T: 'static 
 					Err(::Error::Header)
 				}
 			} else {
-				match <D as Disposition>::from_params(params.collect()).map(ContentDisposition) {
+				match <D as Disposition>::from_params(parse_str_to_hash_map("").unwrap()).map(ContentDisposition) {
 					Ok(h) => Ok(h),
 					Err(_) => Err(::Error::Header)
 				}
@@ -118,18 +119,20 @@ impl<D: Disposition + Any> HeaderFormat for ContentDisposition<D> where D::T: 's
 			}
 		};
 
-		let mut iter = params.iter().peekable();
-
-		while let Some(param) = iter.next() {
-			try!(Display::fmt(param, f));
-
-			if iter.peek().is_some() {
-				try!(f.write_str("; "));
-			}
-		}
+//		let mut iter = params.iter().peekable();
+//
+//		while let Some(param) = iter.next() {
+//			try!(Display::fmt(param, f));
+//
+//			if iter.peek().is_some() {
+//				try!(f.write_str("; "));
+//			}
+//		}
 		Ok(())
     }
 }
+
+type DispositionResult<T> = Result<T, DispositionError>;
 
 /// An content disposition to be used in the header.
 pub trait Disposition: fmt::Debug + Clone + Send + Sync {
@@ -139,23 +142,49 @@ pub trait Disposition: fmt::Debug + Clone + Send + Sync {
     /// Will be replaced with an associated constant once available.
     fn disposition() -> Option<&'static str>;
     /// Format the Disposition data into a header value.
-    fn to_params(&self) -> ::Result<Vec<Self::T>>;
+    fn to_params(&self) -> DispositionResult<HashMap<String, String>>;
 
-	fn from_params(params: Vec<&str>) -> ::Result<Self>;
+	fn from_params(params: HashMap<String, String>) -> DispositionResult<Self>;
 }
 
-impl Disposition for Vec<String> {
+#[derive(Debug)]
+pub enum DispositionError {
+	MissingParam(String),
+	InvalidParam(String)
+}
+
+impl fmt::Display for DispositionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.description())
+    }
+}
+
+impl Error for DispositionError {
+    fn description(&self) -> &str {
+        match *self {
+//            MissingParam(String) => "Invalid HTTP version specified",
+//            InvalidParam(String) => "Invalid Method specified"
+			_ => "hello"
+        }
+    }
+
+    fn cause(&self) -> Option<&Error> {
+        None
+    }
+}
+
+impl Disposition for HashMap<String, String> {
     type T = String;
 
 	fn disposition() -> Option<&'static str> {
         None
     }
 
-	fn from_params(params: Vec<&str>) -> ::Result<Self> {
-		Ok(params.iter().map(|s| String::from(*s)).collect())
+	fn from_params(params: HashMap<String, String>) -> DispositionResult<Self> {
+		Ok(params)
 	}
 
-    fn to_params(&self) -> ::Result<Vec<String>> {
+    fn to_params(&self) -> DispositionResult<HashMap<String, String>> {
         Ok(self.clone())
     }
 }
@@ -171,11 +200,11 @@ impl Disposition for Inline {
         Some("inline")
     }
 
-    fn to_params(&self) -> ::Result<Vec<String>> {
-		Ok(Vec::new())
+    fn to_params(&self) -> DispositionResult<HashMap<String, String>> {
+		Ok(HashMap::new())
     }
 
-	fn from_params(_: Vec<&str>) -> ::Result<Self> {
+	fn from_params(_: HashMap<String, String>) -> DispositionResult<Self> {
 		Ok(Inline)
 	}
 }
@@ -198,39 +227,38 @@ impl Disposition for Attachment {
         Some("attachment")
     }
 
-    fn to_params(&self) -> ::Result<Vec<String>> {
-		Ok(Vec::new())
+    fn to_params(&self) -> DispositionResult<HashMap<String, String>> {
+		Ok(HashMap::new())
     }
 
-	fn from_params(params: Vec<&str>) -> ::Result<Self> {
-		let hash_map = parse_param_vec_to_hash_map(params);
-		let filename = if hash_map.get("filename*").is_some() {
-			hash_map.get("filename*").map(|s| String::from(*s)).unwrap()
+	fn from_params(params: HashMap<String, String>) -> DispositionResult<Self> {
+		let filename = if params.get("filename*").is_some() {
+			params.get("filename*").map(|s| (*s).to_owned()).unwrap()
 		} else {
-			try!(hash_map.get("filename").map(|s| String::from(*s)).ok_or(::Error::Header))
+			try!(params.get("filename").map(|s| (*s).to_owned()).ok_or(DispositionError::MissingParam(String::from("filename or filename*"))))
 		};
-		let filename_fallback = if hash_map.get("filename*").is_some() {
-			hash_map.get("filename").map(|s| String::from(*s))
-		} else {
-			None
-		};
-		let creation_date = if hash_map.get("creation_date").is_some() {
-			Some(try!(HttpDate::from_str(hash_map.get("creation_date").unwrap()).map_err(|_| ::Error::Header)))
+		let filename_fallback = if params.get("filename*").is_some() {
+			params.get("filename").map(|s| (*s).to_owned())
 		} else {
 			None
 		};
-		let modification_date = if hash_map.get("modification_date").is_some() {
-			Some(try!(HttpDate::from_str(hash_map.get("modification_date").unwrap()).map_err(|_| ::Error::Header)))
+		let creation_date = if params.get("creation_date").is_some() {
+			Some(try!(HttpDate::from_str(params.get("creation_date").unwrap()).map_err(|_| DispositionError::InvalidParam(String::from("creation_date")))))
 		} else {
 			None
 		};
-		let read_date = if hash_map.get("read_date").is_some() {
-			Some(try!(HttpDate::from_str(hash_map.get("read_date").unwrap()).map_err(|_| ::Error::Header)))
+		let modification_date = if params.get("modification_date").is_some() {
+			Some(try!(HttpDate::from_str(params.get("modification_date").unwrap()).map_err(|_| DispositionError::InvalidParam(String::from("modification_date")))))
 		} else {
 			None
 		};
-		let size = if hash_map.get("size").is_some() {
-			Some(try!(hash_map.get("size").unwrap().parse().map_err(|_| ::Error::Header)))
+		let read_date = if params.get("read_date").is_some() {
+			Some(try!(HttpDate::from_str(params.get("read_date").unwrap()).map_err(|_| DispositionError::InvalidParam(String::from("read_date")))))
+		} else {
+			None
+		};
+		let size = if params.get("size").is_some() {
+			Some(try!(params.get("size").unwrap().parse().map_err(|_| DispositionError::InvalidParam(String::from("size")))))
 		} else {
 			None
 		};
@@ -246,39 +274,124 @@ impl Disposition for Attachment {
 	}
 }
 
-fn parse_param_vec_to_hash_map(params: Vec<&str>) -> HashMap<&str, &str> {
+pub fn parse_str_to_hash_map(params: &str) -> Result<HashMap<String, String>, &str> {
 
 	let mut map = HashMap::new();
+	
+	let mut iterator = params.chars().peekable();
+	let tspecial = " ()<>@,;:\\\"/[]?=";
+	let modes = [
+	  "before_key",
+	  "in_key",
+	  "after_key",
+	  "before_value",
+	  "in_value",
+	  "in_quoted_value",
+	  "after_value"
+    ];
+	let mut mode = modes[0];
+	let mut key = String::new();
+	let mut value = String::new();
 
-	for param in &params {
-		let mut split_str_iter = param.split("=");
-		let key = split_str_iter.next().unwrap();
-		let value = split_str_iter.next().unwrap();
-
-		map.insert(key, value);
+	while let Some(char) = iterator.next() {
+		println!("{}", char);
+		if !char.is_ascii() {
+			return Err("none ascii chars sent.");
+		}
+		
+		if char == ' ' {
+			if mode == modes[1] {
+				mode = modes[2];
+			}
+			
+			if mode == modes[4] {
+				mode = modes[6];
+				map.insert(key.clone(), value.clone());
+			}
+			
+			if mode != modes[5] {
+				continue;
+			}
+		}
+		
+		if char == '=' {
+			if mode == modes[0] {
+				return Err("no key present.");
+			}
+			
+			if mode == modes[1] || mode == modes[2] {
+				mode = modes[3];
+				continue;
+			}
+		}
+		
+		if char == ';' && (mode == modes[6] || mode == modes[4]) {
+			if mode == modes[4] {
+				map.insert(key.clone(), value.clone());				
+			}
+			mode = modes[0];
+			key = String::new();
+			value = String::new();
+			continue;
+		}
+		
+		if char == '"' {
+			if mode == modes[3] {
+				mode = modes[5];
+				continue;
+			}
+			
+			if mode == modes[5] && !value.ends_with('\\') {
+				mode = modes[6];
+				map.insert(key.clone(), value.clone());
+				continue;
+			}
+		}
+		
+		if mode == modes[0] {
+			mode = modes[1];
+		}
+		
+		if mode == modes[3] {
+			mode = modes[4];
+		}
+		
+		if mode != modes[5] && (char.is_control() || tspecial.find(char).is_some()) {
+			return Err("invalid characters found");
+		}
+		
+		if mode == modes[1] {
+			key.push(char);
+		}
+		
+		if mode == modes[4] || mode == modes[5] {
+			value.push(char);
+		}
 	}
 
-	map
+	Ok(map)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ContentDisposition, Inline};
     use super::super::super::{Headers, Header};
+    use super::parse_str_to_hash_map;
+	use std::collections::HashMap;
 
-    #[test]
-    fn test_raw_disposition() {
-        let mut headers = Headers::new();
-        headers.set(ContentDisposition(vec!["raw".to_owned()]));
-        assert_eq!(headers.to_string(), "Content-Disposition: raw\r\n".to_owned());
-    }
-
-    #[test]
-    fn test_raw_disposition_parse() {
-        let header: ContentDisposition<Vec<String>> = Header::parse_header(
-            &[b"raw".to_vec()]).unwrap();
-        assert_eq!(header.0, vec!["raw".to_owned()]);
-    }
+//    #[test]
+//    fn test_raw_disposition() {
+//        let mut headers = Headers::new();
+//        headers.set(ContentDisposition("raw".to_owned()));
+//        assert_eq!(headers.to_string(), "Content-Disposition: raw\r\n".to_owned());
+//    }
+//
+//    #[test]
+//    fn test_raw_disposition_parse() {
+//        let header: ContentDisposition<String> = Header::parse_header(
+//            &[b"raw".to_vec()]).unwrap();
+//        assert_eq!(header.0, "raw".to_owned());
+//    }
 
     #[test]
     fn test_inline_disposition() {
@@ -294,6 +407,27 @@ mod tests {
         let _: ContentDisposition<Inline> = Header::parse_header(
             &[b"inline".to_vec()]).unwrap();
     }
+    
+    #[test]
+    fn test_parse_str_to_hash_map() {
+    	let params = "hello=goodbye;seeya=\"later dude\"";
+    	let mut hash_map = HashMap::new();
+    	hash_map.insert("hello".to_owned(), "goodbye".to_owned());
+    	hash_map.insert("seeya".to_owned(), "later dude".to_owned());
+    	assert_eq!(
+    		Ok(hash_map),
+    		parse_str_to_hash_map(params)
+		);
+    	assert_eq!(
+    		Err("no key present."),
+    		parse_str_to_hash_map("=hello")
+		);
+    	assert_eq!(
+    		Err("no key present."),
+    		parse_str_to_hash_map("=\"hello\"")
+		);
+    }
+    
 }
 
 bench_header!(raw, ContentDisposition<String>, { vec![b"raw".to_vec()] });
